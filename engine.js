@@ -1,0 +1,902 @@
+// engine.js — All engine code lives in this file
+(function(){
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+
+  function resize(){
+    canvas.width = window.innerWidth * devicePixelRatio;
+    canvas.height = window.innerHeight * devicePixelRatio;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Simple vector/matrix helpers
+  const vec3 = {
+    add: (a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
+    sub: (a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+    mul: (a,s)=>[a[0]*s,a[1]*s,a[2]*s],
+    dot: (a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+    cross: (a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+    norm: a=>{const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l]},
+    len: a=>Math.hypot(a[0],a[1],a[2])
+  };
+
+  // Player physics
+  const player = {
+    pos: [0, 2, 5], // world position (feet)
+    vel: [0, 0, 0], // velocity
+    yaw: 0, // rotation around Y
+    pitch: 0, // rotation around X
+    fov: 75 * Math.PI/180,
+    radius: 0.3, // collision radius
+    height: 1.8, // player height
+    eyeHeight: 1.6, // eye position above feet
+    isGrounded: false,
+    jumpPower: 0, // accumulate jump force
+  };
+
+  const GRAVITY = -19.8;
+  const MOVE_SPEED = 6.0; // units/sec
+  const JUMP_FORCE = 6.5; // units/sec
+  const FRICTION = 0.99; // per frame
+  const GROUND_FRICTION = 0.95;
+  const RENDER_DISTANCE = 500; // units
+  const CHUNK_REGEN_DIST = 30; // regen chunks when player is this far from center
+
+  function resetCamera(){ 
+    player.pos = [0, 2, 5]; 
+    player.vel = [0, 0, 0];
+    player.yaw = 0; 
+    player.pitch = 0;
+    player.isGrounded = false;
+  }
+
+  // Get camera pos (eyes) from player feet pos
+  function getCameraPos(){
+    return [player.pos[0], player.pos[1] + player.eyeHeight, player.pos[2]];
+  }
+
+  // Ray-cast down from pos to find ground height
+  function getTerrainHeightAt(x, z){
+    // Simple heightfield lookup using scene triangles with barycentric interpolation
+    let maxY = -100;
+    
+    for(const tri of sceneTriangles){
+      const v0 = tri.verts[0], v1 = tri.verts[1], v2 = tri.verts[2];
+      
+      // bounding box check (early exit)
+      const minX = Math.min(v0[0], v1[0], v2[0]);
+      const maxX = Math.max(v0[0], v1[0], v2[0]);
+      const minZ = Math.min(v0[2], v1[2], v2[2]);
+      const maxZ = Math.max(v0[2], v1[2], v2[2]);
+      
+      if(x >= minX && x <= maxX && z >= minZ && z <= maxZ){
+        // Barycentric coordinates for point in triangle
+        const denom = ((v1[2]-v2[2])*(v0[0]-v2[0]) + (v2[0]-v1[0])*(v0[2]-v2[2]));
+        if(Math.abs(denom) < 0.0001) continue; // degenerate triangle
+        
+        const a = ((v1[2]-v2[2])*(x-v2[0]) + (v2[0]-v1[0])*(z-v2[2])) / denom;
+        const b = ((v2[2]-v0[2])*(x-v2[0]) + (v0[0]-v2[0])*(z-v2[2])) / denom;
+        const c = 1 - a - b;
+        
+        // if point is inside triangle
+        if(a >= -0.01 && b >= -0.01 && c >= -0.01){
+          const h = a * v0[1] + b * v1[1] + c * v2[1];
+          maxY = Math.max(maxY, h);
+        }
+      }
+    }
+    return maxY;
+  }
+
+  // Keyboard state
+  const keys = {};
+  window.addEventListener('keydown', e=>{ 
+    keys[e.key.toLowerCase()] = true; 
+    if(e.key==='r' || e.key==='R'){ resetCamera(); } 
+    if(e.key===' ' && player.isGrounded){ player.jumpPower = JUMP_FORCE; }
+  });
+  window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
+
+  // regenerate world with G
+  window.addEventListener('keydown', e=>{
+    if(e.key==='g' || e.key==='G'){
+      generateWorld((Date.now() + Math.floor(Math.random()*100000)) % 2147483647);
+    }
+  });
+
+  function updatePlayer(dt){
+    let moveSpeed = MOVE_SPEED;
+    // Increase speed when shift is held
+    if(keys['shift']) moveSpeed *= 4.0;
+    
+    const rotSpeed = 2.0; // radians / second for arrow keys
+    
+    // rotation from arrow keys
+    if(keys['arrowleft']) player.yaw -= rotSpeed * dt;
+    if(keys['arrowright']) player.yaw += rotSpeed * dt;
+    if(keys['arrowdown']) player.pitch = Math.max(-Math.PI/2+0.01, player.pitch - rotSpeed * dt);
+    if(keys['arrowup']) player.pitch = Math.min(Math.PI/2-0.01, player.pitch + rotSpeed * dt);
+
+    // movement direction based on yaw rotation (W/S forward/backward, A/D strafe left/right)
+    // Use proper trigonometry: forward is the direction player yaw points to
+    const yaw = player.yaw;
+    const forward = [Math.sin(0-yaw), 0, Math.cos(0-yaw)]; // forward direction in world space
+    const right = [Math.sin((0-yaw) - Math.PI/2), 0, Math.cos((0-yaw) - Math.PI/2)]; // right direction (perpendicular to forward)
+    
+    let moveDir = [0, 0, 0];
+    
+    if(keys['s']) moveDir = vec3.add(moveDir, forward);
+    if(keys['w']) moveDir = vec3.sub(moveDir, forward);
+    if(keys['d']) moveDir = vec3.sub(moveDir, right);
+    if(keys['a']) moveDir = vec3.add(moveDir, right);
+
+    // normalize and apply move speed
+    if(moveDir[0]||moveDir[1]||moveDir[2]){
+      moveDir = vec3.norm(moveDir);
+      moveDir = vec3.mul(moveDir, moveSpeed);
+    }
+
+    // apply movement to velocity (horizontal only)
+    player.vel[0] = moveDir[0];
+    player.vel[2] = moveDir[2];
+
+    // apply gravity
+    player.vel[1] += GRAVITY * dt;
+    player.vel[1] = Math.max(player.vel[1], -50); // terminal velocity
+
+    // apply jump
+    if(player.jumpPower > 0){
+      player.vel[1] += player.jumpPower;
+      player.jumpPower = 0;
+      player.isGrounded = false;
+    }
+
+    // apply friction when grounded
+    if(player.isGrounded){
+      player.vel[0] *= GROUND_FRICTION;
+      player.vel[2] *= GROUND_FRICTION;
+    } else {
+      player.vel[0] *= FRICTION;
+      player.vel[2] *= FRICTION;
+    }
+
+    // update position
+    const newPos = vec3.add(player.pos, vec3.mul(player.vel, dt));
+
+    // collision and grounding
+    const groundHeight = getTerrainHeightAt(newPos[0], newPos[2]);
+    const feetHeight = newPos[1];
+    const headHeight = newPos[1] + player.height;
+
+    if(feetHeight <= groundHeight){
+      // on ground
+      newPos[1] = groundHeight;
+      player.vel[1] = 0;
+      player.isGrounded = true;
+    } else {
+      player.isGrounded = false;
+    }
+
+    player.pos = newPos;
+    
+    // Check if we need to regenerate chunks
+    const playerChunkX = Math.floor(player.pos[0] / (CHUNK_SIZE * CHUNK_SPACING));
+    const playerChunkZ = Math.floor(player.pos[2] / (CHUNK_SIZE * CHUNK_SPACING));
+    if(Math.abs(playerChunkX - lastPlayerChunkX) > 0 || Math.abs(playerChunkZ - lastPlayerChunkZ) > 0){
+      lastPlayerChunkX = playerChunkX;
+      lastPlayerChunkZ = playerChunkZ;
+      rebuildSceneTriangles(worldSeed);
+    }
+  }
+
+  // Simple seeded PRNG (mulberry32)
+  function mulberry32(a){
+    return function(){
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+  }
+
+  // Transform a point by camera (view) matrix: rotate then translate
+  function worldToCamera(v){
+    // translate relative to camera (eye position)
+    const eyePos = getCameraPos();
+    const p = vec3.sub(v, eyePos);
+    // apply yaw then pitch (order: yaw around Y, pitch around X)
+    const cy = Math.cos(-player.yaw), sy = Math.sin(-player.yaw);
+    const cx = Math.cos(-player.pitch), sx = Math.sin(-player.pitch);
+    // yaw
+    let x = p[0]*cy - p[2]*sy;
+    let z = p[0]*sy + p[2]*cy;
+    let y = p[1];
+    // pitch
+    let y2 = y*cx - z*sx;
+    let z2 = y*sx + z*cx;
+    return [x,y2,z2];
+  }
+
+  // Build scene triangles array
+  let sceneTriangles = [];
+
+  function hslToRgb(h,s,l){
+    // h in [0,1]
+    let r,g,b;
+    if(s===0){ r=g=b=l; }
+    else{
+      const hue2rgb = (p,q,t)=>{
+        if(t<0) t+=1; if(t>1) t-=1;
+        if(t<1/6) return p + (q-p)*6*t;
+        if(t<1/2) return q;
+        if(t<2/3) return p + (q-p)*(2/3 - t)*6;
+        return p;
+      };
+      const q = l < 0.5 ? l*(1+s) : l + s - l*s;
+      const p = 2*l - q;
+      r = hue2rgb(p,q,h + 1/3);
+      g = hue2rgb(p,q,h);
+      b = hue2rgb(p,q,h - 1/3);
+    }
+    return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
+  }
+
+  // Improved Perlin-like noise using sine waves (good enough for terrain)
+  function perlinNoise(x, z, seed){
+    const rnd = mulberry32(seed|0);
+    // skip initial values
+    for(let i=0;i<10;i++) rnd();
+    
+    // mix multiple octaves of sine/cos waves with different frequencies
+    let val = 0;
+    let amp = 1.0;
+    let freq = 1.0;
+    let maxVal = 0;
+    
+    for(let octave=0; octave<6; octave++){
+      val += Math.sin(x*freq*0.15 + rnd()*6.28) * Math.cos(z*freq*0.12 + rnd()*6.28) * amp;
+      maxVal += amp;
+      freq *= 2.1;
+      amp *= 0.5;
+    }
+    return val / maxVal;
+  }
+
+  // Chunk-based world generation for infinite terrain
+  const CHUNK_SIZE = 16;
+  const CHUNK_SPACING = 1.0; // must be 1.0 for chunks to align perfectly
+  const worldChunks = new Map(); // key: "x,z", value: {tris}
+  let worldSeed = 0;
+  let lastPlayerChunkX = 0, lastPlayerChunkZ = 0;
+  
+  function getChunkKey(chunkX, chunkZ){
+    return `${chunkX},${chunkZ}`;
+  }
+
+  function generateChunk(chunkX, chunkZ){
+    const key = getChunkKey(chunkX, chunkZ);
+    if(worldChunks.has(key)) return worldChunks.get(key);
+
+    const seed = worldSeed ^ (chunkX * 73856093) ^ (chunkZ * 19349663);
+    const rnd = mulberry32(seed|0);
+    const tris = [];
+    const spacing = CHUNK_SPACING;
+    
+    // World position of chunk corner
+    const offsetX = chunkX * CHUNK_SIZE * spacing;
+    const offsetZ = chunkZ * CHUNK_SIZE * spacing;
+    
+    // Get biome value (without discrete boundaries) for smooth transitions
+    const getBiomeValue = (x, z) => {
+      let biomeVal = perlinNoise(x * 0.04, z * 0.04, worldSeed); // Higher frequency for smaller biomes (1-2 chunks)
+      biomeVal += perlinNoise(x * 0.08, z * 0.08, worldSeed + 1) * 0.5;
+      return biomeVal / 1.5;
+    };
+    
+    // Get discrete biome from continuous biome value
+    const getBiome = (x, z) => {
+      const biomeVal = getBiomeValue(x, z);
+      if(biomeVal < -0.4) return 'ocean';
+      if(biomeVal < -0.15) return 'lake';
+      if(biomeVal < 0.05) return 'desert';
+      if(biomeVal < 0.3) return 'plains';
+      if(biomeVal < 0.5) return 'snowy_plains';
+      return 'mountains';
+    };
+    
+    // Use perlin-like noise for better terrain with peaks
+    const heightAt = (x,z)=>{
+      // Start with multiple octaves of Perlin noise for smooth base
+      let h = perlinNoise(x, z, worldSeed) * 0.8;
+      h += perlinNoise(x * 2, z * 2, worldSeed + 1) * 0.4;
+      h += perlinNoise(x * 4, z * 4, worldSeed + 2) * 0.2;
+      
+      // Get biome value for smooth blending between biome heights
+      const biomeVal = getBiomeValue(x, z);
+      const biome = getBiome(x, z);
+      
+      // Apply smooth blending based on biome value instead of hard transitions
+      // This prevents jagged borders by using the continuous biome noise
+      const t = (biomeVal + 0.6) / 1.1; // Normalize biome value to 0-1 range
+      const smoothT = Math.max(0, Math.min(1, t)); // Clamp to 0-1
+      
+      // Blend heights based on smooth biome transition
+      if(biomeVal < -0.15){
+        // Ocean/Lake transition
+        const blend = (biomeVal + 0.4) / 0.25;
+        if(blend < 0) h = h * 0.3 - 2.0; // Ocean
+        else if(blend > 1) h = h * 0.2 - 0.5; // Lake
+        else h = h * (0.3 - 0.1*blend) - (2.0 - 1.5*blend); // Smooth blend
+      } else if(biomeVal < 0.05){
+        // Lake/Desert transition
+        const blend = (biomeVal + 0.15) / 0.2;
+        if(blend < 0) h = h * 0.2 - 0.5;
+        else if(blend > 1) h = Math.abs(h) * 0.5 + 0.2;
+        else {
+          const h1 = h * 0.2 - 0.5;
+          const h2 = Math.abs(h) * 0.5 + 0.2;
+          h = h1 * (1-blend) + h2 * blend;
+        }
+      } else if(biomeVal < 0.3){
+        // Desert/Plains transition
+        const blend = (biomeVal - 0.05) / 0.25;
+        if(blend < 0) h = Math.abs(h) * 0.5 + 0.2;
+        else if(blend > 1) h = h * 0.3 + 0.2;
+        else {
+          const h1 = Math.abs(h) * 0.5 + 0.2;
+          const h2 = h * 0.3 + 0.2;
+          h = h1 * (1-blend) + h2 * blend;
+        }
+      } else if(biomeVal < 0.5){
+        // Plains/Snowy transition
+        const blend = (biomeVal - 0.3) / 0.2;
+        if(blend < 0) h = h * 0.3 + 0.2;
+        else if(blend > 1) h = h * 0.5 + 1.0;
+        else {
+          const h1 = h * 0.3 + 0.2;
+          const h2 = h * 0.5 + 1.0;
+          h = h1 * (1-blend) + h2 * blend;
+        }
+      } else {
+        // Snowy/Mountains transition and pure mountains
+        const blend = (biomeVal - 0.5) / 0.3;
+        let h2 = h * 0.5 + 1.0;
+        
+        // Add peaks only in mountain regions
+        if(blend > 0){
+          for(let octave = 0; octave < 3; octave++){
+            const freq = 0.003 * Math.pow(2, octave);
+            const amp = 1.0 / Math.pow(2, octave);
+            
+            const seedRnd = mulberry32((worldSeed + octave * 12345) | 0);
+            const offsetX_rnd = seedRnd() * Math.PI * 2;
+            const offsetZ_rnd = seedRnd() * Math.PI * 2;
+            
+            const peakVal = Math.sin(x * freq + offsetX_rnd) * Math.cos(z * freq + offsetZ_rnd);
+            
+            if(peakVal > 0.2){
+              const peakSpacing = 1.0 / freq;
+              const peakCenterX = Math.round(x / peakSpacing) * peakSpacing;
+              const peakCenterZ = Math.round(z / peakSpacing) * peakSpacing;
+              const distToPeak = Math.hypot(x - peakCenterX, z - peakCenterZ);
+              
+              const peakRadius = peakSpacing * 0.35;
+              const falloff = Math.max(0, 1 - (distToPeak / peakRadius));
+              
+              h2 += falloff * falloff * falloff * peakVal * amp * 8.0 * Math.max(0, blend);
+            }
+          }
+        }
+        
+        if(blend < 0) h = h * 0.5 + 1.0;
+        else if(blend > 1) h = h2;
+        else h = (h * 0.5 + 1.0) * (1-blend) + h2 * blend;
+      }
+      
+      return h * 3.5;
+    };
+    
+    // Function to check if a point is at a peak (for coloring)
+    const isAtPeak = (x, z) => {
+      const biome = getBiome(x, z);
+      if(biome !== 'mountains') return false;
+      
+      for(let octave = 0; octave < 3; octave++){
+        const freq = 0.003 * Math.pow(2, octave);
+        const seedRnd = mulberry32((worldSeed + octave * 12345) | 0);
+        const offsetX_rnd = seedRnd() * Math.PI * 2;
+        const offsetZ_rnd = seedRnd() * Math.PI * 2;
+        
+        const peakVal = Math.sin(x * freq + offsetX_rnd) * Math.cos(z * freq + offsetZ_rnd);
+        
+        if(peakVal > 0.4){
+          const peakSpacing = 1.0 / freq;
+          const peakCenterX = Math.round(x / peakSpacing) * peakSpacing;
+          const peakCenterZ = Math.round(z / peakSpacing) * peakSpacing;
+          const distToPeak = Math.hypot(x - peakCenterX, z - peakCenterZ);
+          const peakRadius = peakSpacing * 0.15;
+          
+          if(distToPeak < peakRadius) return true;
+        }
+      }
+      return false;
+    };
+
+    // generate terrain grid with smoothing
+    const heights = [];
+    for(let ix = 0; ix <= CHUNK_SIZE; ix++){
+      for(let iz = 0; iz <= CHUNK_SIZE; iz++){
+        const x = offsetX + ix * spacing;
+        const z = offsetZ + iz * spacing;
+        const h = heightAt(x, z);
+        heights.push({x, z, h, ix, iz});
+      }
+    }
+
+    // build terrain triangles with height-based coloring
+    for(let ix = 0; ix < CHUNK_SIZE; ix++){
+      for(let iz = 0; iz < CHUNK_SIZE; iz++){
+        const idx = ix*(CHUNK_SIZE+1) + iz;
+        const i1 = idx;
+        const i2 = idx + 1;
+        const i3 = idx + (CHUNK_SIZE+1);
+        const i4 = idx + (CHUNK_SIZE+1) + 1;
+        
+        const h00 = heights[i1].h;
+        const h10 = heights[i2].h;
+        const h01 = heights[i3].h;
+        const h11 = heights[i4].h;
+        
+        const v00 = [heights[i1].x, h00, heights[i1].z];
+        const v10 = [heights[i2].x, h10, heights[i2].z];
+        const v01 = [heights[i3].x, h01, heights[i3].z];
+        const v11 = [heights[i4].x, h11, heights[i4].z];
+
+        // color by biome
+        const colorByBiome = (h, x, z) => {
+          const biome = getBiome(x, z);
+          const atPeak = isAtPeak(x, z);
+          
+          if(biome === 'ocean'){
+            return hslToRgb(0.6, 0.9, 0.4); // Deep ocean blue
+          }
+          else if(biome === 'lake'){
+            return hslToRgb(0.58, 0.85, 0.5); // Lake blue
+          }
+          else if(biome === 'desert'){
+            // Sand dunes with height variation
+            if(h < -0.2) return hslToRgb(0.13, 0.9, 0.55); // Light sand
+            return hslToRgb(0.12, 0.95, 0.52); // Golden sand
+          }
+          else if(biome === 'plains'){
+            // Grassy plains with some variation
+            if(h < 0.3) return hslToRgb(0.28, 0.85, 0.48); // Light grass
+            return hslToRgb(0.25, 0.8, 0.42); // Darker grass
+          }
+          else if(biome === 'snowy_plains'){
+            // Snow-covered plains
+            if(h < 0.6) return hslToRgb(0.2, 0.7, 0.65); // Light snow-covered grass
+            if(h < 1.0) return hslToRgb(0, 0, 0.85); // Snow
+            return hslToRgb(0, 0, 0.9); // Pure snow
+          }
+          else if(biome === 'mountains'){
+            // Mountain rocks and peaks
+            if(atPeak) return hslToRgb(0, 0, 0.95); // Snow peaks
+            if(h > 2.5) return hslToRgb(0, 0, 0.7); // Light grey high altitude
+            if(h > 2.0) return hslToRgb(0, 0, 0.65); // Medium grey
+            if(h > 1.5) return hslToRgb(0, 0, 0.55); // Dark grey slopes
+            return hslToRgb(0.08, 0.6, 0.5); // Brown-grey foothills
+          }
+          
+          return hslToRgb(0, 0, 0.5); // Fallback grey
+        };
+
+        // Calculate average position for coloring
+        const avgX = (heights[i1].x + heights[i2].x + heights[i3].x + heights[i4].x) / 4;
+        const avgZ = (heights[i1].z + heights[i2].z + heights[i3].z + heights[i4].z) / 4;
+        const avgH = (h00 + h10 + h01 + h11) / 4;
+        const col = colorByBiome(avgH, avgX, avgZ);
+
+        // Calculate terrain steepness to determine triangle division strategy
+        const heightVar = Math.max(
+          Math.abs(h00 - h10), Math.abs(h10 - h11),
+          Math.abs(h11 - h01), Math.abs(h01 - h00),
+          Math.abs(h00 - h11), Math.abs(h10 - h01)
+        );
+        
+        // Use diagonal split based on height variation for more natural look
+        const diag1 = Math.abs((h00 + h11) - (h10 + h01)); // diagonal height difference
+        
+        if(heightVar > 1.5){
+          // Steep terrain: add center point and create 4 smaller triangles
+          const cx = (heights[i1].x + heights[i2].x + heights[i3].x + heights[i4].x) / 4;
+          const cz = (heights[i1].z + heights[i2].z + heights[i3].z + heights[i4].z) / 4;
+          const ch = (h00 + h10 + h01 + h11) / 4;
+          const vc = [cx, ch, cz];
+          
+          tris.push({ verts: [v00, v10, vc], color: col });
+          tris.push({ verts: [v10, v11, vc], color: col });
+          tris.push({ verts: [v11, v01, vc], color: col });
+          tris.push({ verts: [v01, v00, vc], color: col });
+        } else if(diag1 < 0.5){
+          // Flat terrain: use normal split
+          tris.push({ verts: [v00, v10, v11], color: col });
+          tris.push({ verts: [v00, v11, v01], color: col });
+        } else {
+          // Moderate slope: use alternate split
+          tris.push({ verts: [v00, v10, v01], color: col });
+          tris.push({ verts: [v10, v11, v01], color: col });
+        }
+      }
+    }
+
+    // add procedural trees to chunk
+    const treeCount = Math.floor(3 + rnd()*4); // fewer trees overall
+    for(let t=0; t<treeCount; t++){
+      const tx = offsetX + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.9;
+      const tz = offsetZ + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.9;
+      const th = heightAt(tx, tz);
+      const biome = getBiome(tx, tz);
+      
+      // Only place vegetation in appropriate biomes
+      if(biome === 'ocean' || biome === 'lake') continue;
+      
+      let canPlaceVegetation = false;
+      let vegetationType = null;
+      
+      // Biome-specific height ranges and vegetation types
+      if(biome === 'desert'){
+        // Desert gets cacti
+        if(th > -0.5 && th < 0.8) {
+          canPlaceVegetation = true;
+          vegetationType = 'cactus';
+        }
+      } else if(biome === 'plains'){
+        // Plains prefer oaks and shrubs
+        if(th > 0.1 && th < 0.5) {
+          canPlaceVegetation = true;
+          vegetationType = Math.random() > 0.4 ? 'oak' : 'shrub';
+        }
+      } else if(biome === 'snowy_plains'){
+        // Snowy plains prefer evergreens and shrubs
+        if(th > 0.8 && th < 1.5) {
+          canPlaceVegetation = true;
+          vegetationType = Math.random() > 0.5 ? 'evergreen' : 'shrub';
+        }
+      } else if(biome === 'mountains'){
+        // Mountains prefer tall evergreens
+        if(th > 1.0 && th < 3.0) {
+          canPlaceVegetation = true;
+          vegetationType = 'evergreen';
+        }
+      }
+      
+      if(!canPlaceVegetation) continue;
+      
+      if(vegetationType === 'cactus'){
+        // CACTUS: Tall, narrow, segmented, desert green
+        const cactusH = 1.2 + rnd()*0.6;
+        const cactusRad = 0.15 + rnd()*0.08;
+        const cactusColor = hslToRgb(0.32, 0.75, 0.35); // Warm desert green
+        const segments = 5 + Math.floor(rnd()*3);
+        
+        // Main trunk (cylinder-like)
+        const sides = 6;
+        const segmentH = cactusH / segments;
+        
+        for(let seg = 0; seg < segments; seg++){
+          const h1 = th + seg * segmentH;
+          const h2 = th + (seg + 1) * segmentH;
+          const rad1 = cactusRad * (1 + Math.sin(seg * 0.8) * 0.2); // Slight waviness
+          const rad2 = cactusRad * (1 + Math.sin((seg + 1) * 0.8) * 0.2);
+          
+          for(let s = 0; s < sides; s++){
+            const a1 = (s / sides) * Math.PI * 2;
+            const a2 = ((s + 1) / sides) * Math.PI * 2;
+            const v0 = [tx + Math.cos(a1) * rad1, h1, tz + Math.sin(a1) * rad1];
+            const v1 = [tx + Math.cos(a2) * rad1, h1, tz + Math.sin(a2) * rad1];
+            const v2 = [tx + Math.cos(a2) * rad2, h2, tz + Math.sin(a2) * rad2];
+            const v3 = [tx + Math.cos(a1) * rad2, h2, tz + Math.sin(a1) * rad2];
+            tris.push({ verts: [v0, v1, v2], color: cactusColor });
+            tris.push({ verts: [v0, v2, v3], color: cactusColor });
+          }
+        }
+        
+        // Add small arms/spines sticking out (simple spikes)
+        const spineColor = hslToRgb(0.08, 0.8, 0.4); // Dark brownish for spines
+        for(let seg = 0; seg < segments; seg += 2){
+          const segH = th + (seg + 0.5) * segmentH;
+          const armCount = 3 + Math.floor(rnd() * 2);
+          
+          for(let a = 0; a < armCount; a++){
+            const angle = (a / armCount) * Math.PI * 2;
+            const armLen = 0.25 + rnd() * 0.15;
+            const armX = tx + Math.cos(angle) * (cactusRad + armLen);
+            const armZ = tz + Math.sin(angle) * (cactusRad + armLen);
+            const armTipH = segH + rnd() * 0.2;
+            
+            const baseX = tx + Math.cos(angle) * cactusRad;
+            const baseZ = tz + Math.sin(angle) * cactusRad;
+            
+            // Simple triangular spike
+            const v0 = [baseX, segH, baseZ];
+            const v1 = [armX, armTipH, armZ];
+            const v2 = [baseX + (rnd() - 0.5) * 0.1, segH + 0.1, baseZ + (rnd() - 0.5) * 0.1];
+            tris.push({ verts: [v0, v1, v2], color: spineColor });
+          }
+        }
+      }
+      else if(vegetationType === 'evergreen'){
+        // Type 0: TALL SKINNY EVERGREEN (Pine) - vertical spike shape
+        const trunkH = biome === 'mountains' ? 2.5 + rnd()*1.5 : 1.5 + rnd()*0.8;
+        const baseRad = 0.2 + rnd()*0.1;
+        const apexH = th + trunkH + 2.5 + rnd()*0.8;
+        const treeColor = biome === 'snowy_plains' ? 
+          hslToRgb(0.35, 0.7, 0.35) : // Darker green for snowy areas
+          hslToRgb(0.38, 0.85, 0.25); // Dark forest green for mountains
+        const trunkColor = hslToRgb(0.05, 0.6, 0.15); // dark brown
+        
+        // Very thin trunk
+        const trunkRad = 0.05;
+        const sides = 4;
+        const trunkTop = [tx, th + trunkH, tz];
+        for(let s=0; s<sides; s++){
+          const a1 = (s/sides)*Math.PI*2;
+          const a2 = ((s+1)/sides)*Math.PI*2;
+          const v1 = [tx + Math.cos(a1)*trunkRad, th, tz + Math.sin(a1)*trunkRad];
+          const v2 = [tx + Math.cos(a2)*trunkRad, th, tz + Math.sin(a2)*trunkRad];
+          tris.push({ verts: [v1, v2, trunkTop], color: trunkColor });
+        }
+        
+        // Very tall, very narrow cone
+        const layers = 8;
+        for(let lay=0; lay<layers; lay++){
+          const layRad = baseRad * Math.pow(1 - lay/(layers+1), 2.5);
+          const layH = th + trunkH + (apexH - th - trunkH)*lay/(layers+1);
+          const nextRad = baseRad * Math.pow(1 - (lay+1)/(layers+1), 2.5);
+          const nextH = th + trunkH + (apexH - th - trunkH)*(lay+1)/(layers+1);
+          
+          for(let s=0; s<sides; s++){
+            const a1 = (s/sides)*Math.PI*2;
+            const a2 = ((s+1)/sides)*Math.PI*2;
+            const v0 = [tx + Math.cos(a1)*layRad, layH, tz + Math.sin(a1)*layRad];
+            const v1 = [tx + Math.cos(a2)*layRad, layH, tz + Math.sin(a2)*layRad];
+            const v2 = [tx + Math.cos(a2)*nextRad, nextH, tz + Math.sin(a2)*nextRad];
+            const v3 = [tx + Math.cos(a1)*nextRad, nextH, tz + Math.sin(a1)*nextRad];
+            tris.push({ verts: [v0, v1, v2], color: treeColor });
+            tris.push({ verts: [v0, v2, v3], color: treeColor });
+          }
+        }
+      }
+      else if(vegetationType === 'oak'){
+        // Type 1: WIDE SPREADING OAK - massive crown, short trunk
+        const trunkH = 0.6 + rnd()*0.3;
+        const maxRad = 0.65 + rnd()*0.3;
+        const topH = th + trunkH + maxRad;
+        const treeColor = hslToRgb(0.28, 0.75, 0.36); // bright medium green
+        const trunkColor = hslToRgb(0.08, 0.7, 0.25); // thicker brown trunk
+        
+        // Very thick chunky trunk
+        const trunkRad = 0.25;
+        const sides = 12;
+        const trunkTop = [tx, th + trunkH, tz];
+        for(let s=0; s<sides; s++){
+          const a1 = (s/sides)*Math.PI*2;
+          const a2 = ((s+1)/sides)*Math.PI*2;
+          const v1 = [tx + Math.cos(a1)*trunkRad, th, tz + Math.sin(a1)*trunkRad];
+          const v2 = [tx + Math.cos(a2)*trunkRad, th, tz + Math.sin(a2)*trunkRad];
+          tris.push({ verts: [v1, v2, trunkTop], color: trunkColor });
+        }
+        
+        // 4 wide overlapping spheres for massive crown
+        const layers = 4;
+        for(let lay=0; lay<layers; lay++){
+          const layRad = maxRad * (1 - lay*0.1);
+          const layH = th + trunkH + (maxRad * 0.6) * lay;
+          const nextRad = maxRad * (1 - (lay+1)*0.1);
+          const nextH = th + trunkH + (maxRad * 0.6) * (lay+1);
+          
+          for(let s=0; s<sides; s++){
+            const a1 = (s/sides)*Math.PI*2;
+            const a2 = ((s+1)/sides)*Math.PI*2;
+            const v0 = [tx + Math.cos(a1)*layRad, layH, tz + Math.sin(a1)*layRad];
+            const v1 = [tx + Math.cos(a2)*layRad, layH, tz + Math.sin(a2)*layRad];
+            const v2 = [tx + Math.cos(a2)*nextRad, nextH, tz + Math.sin(a2)*nextRad];
+            const v3 = [tx + Math.cos(a1)*nextRad, nextH, tz + Math.sin(a1)*nextRad];
+            tris.push({ verts: [v0, v1, v2], color: treeColor });
+            tris.push({ verts: [v0, v2, v3], color: treeColor });
+          }
+        }
+      }
+      else if(vegetationType === 'shrub'){
+        // Type 2: SQUAT DENSE SHRUB
+        const shrubH = 0.3 + rnd()*0.15;
+        const shrubRad = 0.35 + rnd()*0.15;
+        const shrubColor = biome === 'snowy_plains' ?
+          hslToRgb(0.35, 0.6, 0.5) : // Lighter frosted look for snowy
+          hslToRgb(0.25, 0.8, 0.38); // Bright yellowish-green for plains
+        const sides = 10;
+        
+        // Dense rounded dome shape
+        const apexH = th + shrubH;
+        const apex = [tx, apexH, tz];
+        
+        // Base circle at ground
+        const baseHeight = th;
+        const baseRad = shrubRad;
+        for(let s=0; s<sides; s++){
+          const a1 = (s/sides)*Math.PI*2;
+          const a2 = ((s+1)/sides)*Math.PI*2;
+          const v0 = [tx + Math.cos(a1)*baseRad, baseHeight, tz + Math.sin(a1)*baseRad];
+          const v1 = [tx + Math.cos(a2)*baseRad, baseHeight, tz + Math.sin(a2)*baseRad];
+          tris.push({ verts: [v0, v1, apex], color: shrubColor });
+        }
+        
+        // Add TWO middle layers for more dense appearance
+        const mid1Rad = shrubRad * 0.9;
+        const mid1H = th + shrubH * 0.4;
+        for(let s=0; s<sides; s++){
+          const a1 = (s/sides)*Math.PI*2;
+          const a2 = ((s+1)/sides)*Math.PI*2;
+          const v0 = [tx + Math.cos(a1)*baseRad, baseHeight, tz + Math.sin(a1)*baseRad];
+          const v1 = [tx + Math.cos(a2)*baseRad, baseHeight, tz + Math.sin(a2)*baseRad];
+          const v2 = [tx + Math.cos(a2)*mid1Rad, mid1H, tz + Math.sin(a2)*mid1Rad];
+          const v3 = [tx + Math.cos(a1)*mid1Rad, mid1H, tz + Math.sin(a1)*mid1Rad];
+          tris.push({ verts: [v0, v1, v2], color: shrubColor });
+          tris.push({ verts: [v0, v2, v3], color: shrubColor });
+        }
+        
+        const mid2Rad = shrubRad * 0.75;
+        const mid2H = th + shrubH * 0.7;
+        for(let s=0; s<sides; s++){
+          const a1 = (s/sides)*Math.PI*2;
+          const a2 = ((s+1)/sides)*Math.PI*2;
+          const v0 = [tx + Math.cos(a1)*mid1Rad, mid1H, tz + Math.sin(a1)*mid1Rad];
+          const v1 = [tx + Math.cos(a2)*mid1Rad, mid1H, tz + Math.sin(a2)*mid1Rad];
+          const v2 = [tx + Math.cos(a2)*mid2Rad, mid2H, tz + Math.sin(a2)*mid2Rad];
+          const v3 = [tx + Math.cos(a1)*mid2Rad, mid2H, tz + Math.sin(a1)*mid2Rad];
+          tris.push({ verts: [v0, v1, v2], color: shrubColor });
+          tris.push({ verts: [v0, v2, v3], color: shrubColor });
+        }
+      }
+    }
+
+    const chunk = { tris };
+    worldChunks.set(key, chunk);
+    return chunk;
+  }
+
+  function generateWorld(seed){
+    worldSeed = seed;
+    worldChunks.clear();
+    lastPlayerChunkX = 0;
+    lastPlayerChunkZ = 0;
+    rebuildSceneTriangles(seed);
+  }
+
+  function rebuildSceneTriangles(seed){
+    sceneTriangles = [];
+    // Get player chunk position
+    const playerChunkX = Math.floor(player.pos[0] / (CHUNK_SIZE * CHUNK_SPACING));
+    const playerChunkZ = Math.floor(player.pos[2] / (CHUNK_SIZE * CHUNK_SPACING));
+    
+    // Generate/load chunks around player (5x5 grid for better coverage)
+    for(let cx=playerChunkX-2; cx<=playerChunkX+2; cx++){
+      for(let cz=playerChunkZ-2; cz<=playerChunkZ+2; cz++){
+        const chunk = generateChunk(cx, cz);
+        sceneTriangles.push(...chunk.tris);
+      }
+    }
+  }
+
+  // initial world
+  generateWorld(Date.now() % 2147483647);
+  
+  // Place player on valid terrain
+  const initialGroundHeight = getTerrainHeightAt(0, 0);
+  player.pos[1] = Math.max(initialGroundHeight + 0.5, 0.5);
+
+  function project(v){
+    // camera looks down -Z; we expect z negative in front
+    // we'll treat objects with z>0 (behind camera) as clipped
+    const aspect = canvas.width / canvas.height;
+    const f = 1 / Math.tan(player.fov / 2);
+    // simple projection to NDC
+    const z = v[2] || 0.0001;
+    return {
+      ndc: [ (v[0] * f) / (-z * aspect), (v[1] * f) / -z ],
+      z: z
+    };
+  }
+
+  function ndcToScreen(ndc){
+    const x = (ndc[0] * 0.5 + 0.5) * canvas.width;
+    const y = (1 - (ndc[1] * 0.5 + 0.5)) * canvas.height; // flip y
+    return [x,y];
+  }
+
+  function drawTriangle(p1,p2,p3,color){
+    ctx.beginPath();
+    ctx.moveTo(p1[0],p1[1]); ctx.lineTo(p2[0],p2[1]); ctx.lineTo(p3[0],p3[1]); ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // render loop
+  let last = performance.now();
+  function frame(now){
+    const dt = Math.min(0.05, (now - last)/1000); last = now;
+    updatePlayer(dt);
+
+    // draw blue skybox background
+    ctx.fillStyle = '#87CEEB'; // sky blue
+    ctx.fillRect(0,0,canvas.width+150,canvas.height+150);
+    // render procedural scene with render distance
+    const tris = [];
+    const eyePos = getCameraPos();
+    
+    for(const tri of sceneTriangles){
+      // Check render distance - only process if triangle is within render distance
+      const triCenter = [
+        (tri.verts[0][0] + tri.verts[1][0] + tri.verts[2][0]) / 3,
+        (tri.verts[0][1] + tri.verts[1][1] + tri.verts[2][1]) / 3,
+        (tri.verts[0][2] + tri.verts[1][2] + tri.verts[2][2]) / 3
+      ];
+      const distToTri = vec3.len(vec3.sub(triCenter, eyePos));
+      if(distToTri > RENDER_DISTANCE) continue;
+      
+      const camVerts = tri.verts.map(worldToCamera);
+      // cull if any vertex is behind camera (z > -0.15)
+      if(camVerts.some(v=>v[2] > -0.15)) continue;
+      // compute normal in camera space
+      const e1 = vec3.sub(camVerts[1], camVerts[0]);
+      const e2 = vec3.sub(camVerts[2], camVerts[0]);
+      const normal = vec3.cross(e1,e2);
+      // DISABLED: back-face culling - commented out to debug missing triangles
+      // if(normal[2] <= 0) continue;
+
+      // lighting (simple directional)
+      // Light direction in world space pointing from light to surface
+      const lightWorld = vec3.norm([0.5, 0.8, 0.3]);
+      // Transform light to camera space (same rotation as camera)
+      const cy = Math.cos(-player.yaw), sy = Math.sin(-player.yaw);
+      const cx = Math.cos(-player.pitch), sx = Math.sin(-player.pitch);
+      let lx = lightWorld[0]*cy - lightWorld[2]*sy;
+      let lz = lightWorld[0]*sy + lightWorld[2]*cy;
+      let ly = lightWorld[1];
+      let ly2 = ly*cx - lz*sx;
+      let lz2 = ly*sx + lz*cx;
+      const lightCam = vec3.norm([lx, ly2, lz2]);
+      
+      const nrm = vec3.norm(normal);
+      const diff = Math.max(0.2, vec3.dot(nrm, lightCam));
+
+      // project
+      const proj = camVerts.map(project);
+      const screen = proj.map(p=>ndcToScreen(p.ndc));
+      // average depth for painter
+      const avgZ = (proj[0].z + proj[1].z + proj[2].z) / 3;
+
+      // shade color based on lighting
+      const base = tri.color; // [r,g,b]
+      const col = `rgb(${Math.floor(base[0]*diff)},${Math.floor(base[1]*diff)},${Math.floor(base[2]*diff)})`;
+      tris.push({screen, z: avgZ, color: col});
+    }
+
+    // painter's algorithm (far -> near)
+    tris.sort((a,b)=>a.z - b.z);
+    for(const t of tris) drawTriangle(t.screen[0], t.screen[1], t.screen[2], t.color);
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // Small instructions in dev console
+  console.log('Simple JS 3D Engine — WASD to move, arrow keys to rotate, R to reset, G for new world');
+})();
