@@ -17,7 +17,6 @@ python3 -m http.server 8000
 # then open http://localhost:8000 in your browser
 ```
 
-The engine uses a software renderer on a 2D canvas (filled triangles, back-face culling and simple lighting).
+The engine uses a software renderer on a 2D canvas (filled triangles, back-face culling and simple lighting) made from scratch. The seed based terrain generator uses perlin noise, is also made from scratch
 
-# 3dEngine
-A triangle-based 3D engine built from scratch
+Please tell me how I can fix the terrain generaton because it likes to sometimes generate sharp ledges.

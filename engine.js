@@ -38,6 +38,7 @@
     jumpPower: 0, // accumulate jump force
   };
 
+  // Physics constants
   const GRAVITY = -19.8;
   const MOVE_SPEED = 6.0; // units/sec
   const JUMP_FORCE = 6.5; // units/sec
@@ -111,9 +112,9 @@
   function updatePlayer(dt){
     let moveSpeed = MOVE_SPEED;
     // Increase speed when shift is held
-    if(keys['shift']) moveSpeed *= 4.0;
+    if(keys['shift']) moveSpeed *= 6.0;
     
-    const rotSpeed = 2.0; // radians / second for arrow keys
+    const rotSpeed = 3.0; // radians / second for arrow keys
     
     // rotation from arrow keys
     if(keys['arrowleft']) player.yaw -= rotSpeed * dt;
@@ -252,12 +253,12 @@
     for(let i=0;i<10;i++) rnd();
     
     // mix multiple octaves of sine/cos waves with different frequencies
-    let val = 0;
-    let amp = 1.0;
-    let freq = 1.0;
+    let val = 1.5;
+    let amp = 1.5;
+    let freq = 0.8; 
     let maxVal = 0;
     
-    for(let octave=0; octave<6; octave++){
+    for(let octave=0; octave<3; octave++){
       val += Math.sin(x*freq*0.15 + rnd()*6.28) * Math.cos(z*freq*0.12 + rnd()*6.28) * amp;
       maxVal += amp;
       freq *= 2.1;
@@ -292,9 +293,9 @@
     
     // Get biome value (without discrete boundaries) for smooth transitions
     const getBiomeValue = (x, z) => {
-      let biomeVal = perlinNoise(x * 0.04, z * 0.04, worldSeed); // Higher frequency for smaller biomes (1-2 chunks)
+      let biomeVal = 0 //perlinNoise(x * 0.04, z * 0.04, worldSeed); // Higher frequency for smaller biomes (1-2 chunks)
       biomeVal += perlinNoise(x * 0.08, z * 0.08, worldSeed + 1) * 0.5;
-      return biomeVal / 1.5;
+      return biomeVal / 1.5; // normalize to -1 to 1 range
     };
     
     // Get discrete biome from continuous biome value
@@ -311,9 +312,8 @@
     // Use perlin-like noise for better terrain with peaks
     const heightAt = (x,z)=>{
       // Start with multiple octaves of Perlin noise for smooth base
-      let h = perlinNoise(x, z, worldSeed) * 0.8;
-      h += perlinNoise(x * 2, z * 2, worldSeed + 1) * 0.4;
-      h += perlinNoise(x * 4, z * 4, worldSeed + 2) * 0.2;
+      let h = perlinNoise(x, z, worldSeed) * 5.0; 
+      h += perlinNoise(x * 4, z * 4, worldSeed + 1) * 0.4;
       
       // Get biome value for smooth blending between biome heights
       const biomeVal = getBiomeValue(x, z);
@@ -824,7 +824,7 @@
     ctx.moveTo(p1[0],p1[1]); ctx.lineTo(p2[0],p2[1]); ctx.lineTo(p3[0],p3[1]); ctx.closePath();
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 0; ctx.stroke();
   }
 
   // render loop
@@ -835,7 +835,9 @@
 
     // draw blue skybox background
     ctx.fillStyle = '#87CEEB'; // sky blue
-    ctx.fillRect(0,0,canvas.width+150,canvas.height+150);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.rect(0,0,canvas.width,canvas.height);
+
     // render procedural scene with render distance
     const tris = [];
     const eyePos = getCameraPos();
@@ -896,7 +898,4 @@
   }
 
   requestAnimationFrame(frame);
-
-  // Small instructions in dev console
-  console.log('Simple JS 3D Engine — WASD to move, arrow keys to rotate, R to reset, G for new world');
 })();
