@@ -1,22 +1,30 @@
-# JS 3D Engine With Terrain Gen.
+# JS 3D Engine
 
-This is a 3D engine implemented entirely inside `engine.js` and displayed by `index.html`.
+This is a small 3D engine implemented entirely in `engine.js` and displayed by `index.html`.
 
-Controls:
-- `W` / `A` / `S` / `D` — move camera forward/left/back/right
-- Arrow keys — rotate camera (yaw & pitch)
-- `R` — reset camera position
-- `G` — generate new world
+**Controls**
+- **Move:** `W` / `A` / `S` / `D`
+- **Look (yaw/pitch):** Arrow keys
+- **Roll:** `Q` (left) / `E` (right)
+- **Jump:** Space (when grounded)
+- **Reset camera:** `R`
+- **Regenerate world (new seed):** `G`
 
-To run:
-1. Open `index.html` in your browser (double-click or run a local HTTP server).
-2. For best results run a simple local server from the project folder, e.g.:
+**Run locally**
+- Quick: open `index.html` directly in a modern browser (may have mixed results with modules).
+- Recommended: run a local server (enables ES modules and CDN imports):
 
 ```bash
 python3 -m http.server 8000
-# then open http://localhost:8000 in your browser
+# then open http://localhost:8000
 ```
 
-The engine uses a software renderer on a 2D canvas (filled triangles, back-face culling and simple lighting) made from scratch. The seed based terrain generator uses perlin noise, is also made from scratch
+**What this engine does**
+- Software renderer on an HTML canvas (triangle rasterization, back-face culling, simple lighting).
+- Seeded procedural terrain using simplex-noise (fBm) with multiple octaves.
+- Biomes: ocean, lake, desert, plains, snowy_plains, mountains (biome mix controlled by multi-scale noise).
+- Vegetation: clustered tree placement with outliers and biome-aware types (cactus, oak, evergreen, shrub).
 
-Please tell me how I can fix the terrain generaton because it likes to sometimes generate sharp ledges.
+**Tuning & debugging**
+- To reduce sharp ledges: increase smoothing iterations in `engine.js` (search `smoothIterations`) or lower noise frequency.
+- To change water level / amplitude: edit the water scaling near `heightAt` in `engine.js`.
