@@ -1,4 +1,6 @@
 // engine.js — All engine code lives in this file
+import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm';
+
 (function(){
   const canvas = document.getElementById('screen');
   const ctx = canvas.getContext('2d');
@@ -30,6 +32,7 @@
     vel: [0, 0, 0], // velocity
     yaw: 0, // rotation around Y
     pitch: 0, // rotation around X
+    roll: 0, // rotation around Z (roll)
     fov: 75 * Math.PI/180,
     radius: 0.3, // collision radius
     height: 1.8, // player height
@@ -52,6 +55,7 @@
     player.vel = [0, 0, 0];
     player.yaw = 0; 
     player.pitch = 0;
+    player.roll = 0;
     player.isGrounded = false;
   }
 
@@ -121,6 +125,9 @@
     if(keys['arrowright']) player.yaw += rotSpeed * dt;
     if(keys['arrowdown']) player.pitch = Math.max(-Math.PI/2+0.01, player.pitch - rotSpeed * dt);
     if(keys['arrowup']) player.pitch = Math.min(Math.PI/2-0.01, player.pitch + rotSpeed * dt);
+    // roll with Q/E
+    if(keys['q']) player.roll -= rotSpeed * dt;
+    if(keys['e']) player.roll += rotSpeed * dt;
 
     // movement direction based on yaw rotation (W/S forward/backward, A/D strafe left/right)
     // Use proper trigonometry: forward is the direction player yaw points to
@@ -219,7 +226,11 @@
     // pitch
     let y2 = y*cx - z*sx;
     let z2 = y*sx + z*cx;
-    return [x,y2,z2];
+    // roll (rotate around camera Z axis)
+    const cr = Math.cos(-player.roll), sr = Math.sin(-player.roll);
+    let x2 = x * cr - y2 * sr;
+    let y3 = x * sr + y2 * cr;
+    return [x2, y3, z2];
   }
 
   // Build scene triangles array
@@ -246,25 +257,36 @@
     return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
   }
 
-  // Improved Perlin-like noise using sine waves (good enough for terrain)
+  // Replace previous perlin-like implementation with seeded simplex-noise fBm
+  const _simplexCache = new Map();
+  function getSimplex(seed){
+    const key = seed|0;
+    if(_simplexCache.has(key)) return _simplexCache.get(key);
+    const rnd = mulberry32(key);
+    const rndFn = () => rnd();
+    const inst = new SimplexNoise(rndFn);
+    _simplexCache.set(key, inst);
+    return inst;
+  }
+
+  // Keep the function name `perlinNoise` so existing calls remain unchanged.
+  // This uses fractal Brownian motion (fBm) over simplex noise and returns in approx [-1,1].
   function perlinNoise(x, z, seed){
-    const rnd = mulberry32(seed|0);
-    // skip initial values
-    for(let i=0;i<10;i++) rnd();
-    
-    // mix multiple octaves of sine/cos waves with different frequencies
-    let val = 1.5;
-    let amp = 1.5;
-    let freq = 0.8; 
-    let maxVal = 0;
-    
-    for(let octave=0; octave<3; octave++){
-      val += Math.sin(x*freq*0.15 + rnd()*6.28) * Math.cos(z*freq*0.12 + rnd()*6.28) * amp;
-      maxVal += amp;
-      freq *= 2.1;
-      amp *= 0.5;
+    const inst = getSimplex(seed || 0);
+    let value = 0;
+    let amplitude = 3.0;
+    let frequency = 0.025; // base frequency (tweak for visible scale)
+    const octaves = 1;
+    const lacunarity = 2.0;
+    const gain = 0.5;
+    let ampSum = 0;
+    for(let i=0;i<octaves;i++){
+      value += inst.noise2D(x * frequency, z * frequency) * amplitude;
+      ampSum += amplitude;
+      amplitude *= gain;
+      frequency *= lacunarity;
     }
-    return val / maxVal;
+    return value / ampSum;
   }
 
   // Chunk-based world generation for infinite terrain
@@ -292,20 +314,24 @@
     const offsetZ = chunkZ * CHUNK_SIZE * spacing;
     
     // Get biome value (without discrete boundaries) for smooth transitions
+    // Adjusted weights and frequencies to favor snowy patches and reduce desert coverage.
     const getBiomeValue = (x, z) => {
-      let biomeVal = 0 //perlinNoise(x * 0.04, z * 0.04, worldSeed); // Higher frequency for smaller biomes (1-2 chunks)
-      biomeVal += perlinNoise(x * 0.08, z * 0.08, worldSeed + 1) * 0.5;
-      return biomeVal / 1.5; // normalize to -1 to 1 range
+      const low = perlinNoise(x * 0.0055, z * 0.0055, worldSeed) * 0.8; // very large-scale
+      const mid = perlinNoise(x * 0.035, z * 0.035, worldSeed + 1) * 0.45; // medium
+      const high = perlinNoise(x * 0.28, z * 0.28, worldSeed + 2) * 1.05; // high-frequency favors snow
+      const biomeVal = (low * 0.6 + mid * 0.4 + high * 1.3) / (0.6 + 0.4 + 1.3);
+      return biomeVal; // roughly in [-1,1]
     };
     
     // Get discrete biome from continuous biome value
     const getBiome = (x, z) => {
       const biomeVal = getBiomeValue(x, z);
-      if(biomeVal < -0.4) return 'ocean';
-      if(biomeVal < -0.15) return 'lake';
-      if(biomeVal < 0.05) return 'desert';
-      if(biomeVal < 0.3) return 'plains';
-      if(biomeVal < 0.5) return 'snowy_plains';
+      if(biomeVal < -0.45) return 'ocean';
+      if(biomeVal < -0.1) return 'lake';
+      // Narrow desert band to reduce desert coverage
+      if(biomeVal < 0.12) return 'desert';
+      if(biomeVal < 0.35) return 'plains';
+      if(biomeVal < 0.6) return 'snowy_plains';
       return 'mountains';
     };
     
@@ -396,7 +422,16 @@
         else if(blend > 1) h = h2;
         else h = (h * 0.5 + 1.0) * (1-blend) + h2 * blend;
       }
-      
+
+      // Reduce water amplitude for oceans/lakes so they are flatter but still gentle hills
+      // Scale depends on biome to keep mountains high while flattening sea/lake regions
+      const biomeValForReturn = getBiome(x, z);
+      if(biomeValForReturn === 'ocean'){
+        return h * 1.0 - 2.2; // lower sea level and reduced amplitude
+      } else if(biomeValForReturn === 'lake'){
+        return h * 1.6 - 0.6; // shallower lakes
+      }
+
       return h * 3.5;
     };
     
@@ -426,108 +461,128 @@
       return false;
     };
 
-    // generate terrain grid with smoothing
-    const heights = [];
-    for(let ix = 0; ix <= CHUNK_SIZE; ix++){
-      for(let iz = 0; iz <= CHUNK_SIZE; iz++){
-        const x = offsetX + ix * spacing;
-        const z = offsetZ + iz * spacing;
-        const h = heightAt(x, z);
-        heights.push({x, z, h, ix, iz});
+    // generate a padded terrain grid (one extra row/col on each side) to allow smoothing across chunk borders
+    const PAD = 1;
+    const gridSize = CHUNK_SIZE + 1; // original grid points per chunk (0..CHUNK_SIZE)
+    const padSize = gridSize + PAD*2; // padded grid size
+    const padded = new Array(padSize * padSize);
+
+    for(let ix = 0; ix < padSize; ix++){
+      for(let iz = 0; iz < padSize; iz++){
+        const worldX = offsetX + (ix - PAD) * spacing;
+        const worldZ = offsetZ + (iz - PAD) * spacing;
+        const h = heightAt(worldX, worldZ);
+        padded[ix * padSize + iz] = { x: worldX, z: worldZ, h };
       }
     }
 
-    // build terrain triangles with height-based coloring
+    // apply a simple 3x3 smoothing kernel (weighted) to reduce abrupt jumps
+    const smoothIterations = 1;
+    const kernel = [
+      [1,2,1],
+      [2,4,2],
+      [1,2,1]
+    ];
+    const kernelSum = 16;
+
+    for(let it = 0; it < smoothIterations; it++){
+      const next = new Array(padded.length);
+      for(let ix = 0; ix < padSize; ix++){
+        for(let iz = 0; iz < padSize; iz++){
+          let acc = 0;
+          let sum = 0;
+          for(let kx = -1; kx <= 1; kx++){
+            for(let kz = -1; kz <= 1; kz++){
+              const sx = ix + kx;
+              const sz = iz + kz;
+              if(sx < 0 || sx >= padSize || sz < 0 || sz >= padSize) continue;
+              const w = kernel[kx+1][kz+1];
+              acc += padded[sx*padSize + sz].h * w;
+              sum += w;
+            }
+          }
+          next[ix*padSize + iz] = { x: padded[ix*padSize + iz].x, z: padded[ix*padSize + iz].z, h: acc / sum };
+        }
+      }
+      for(let i=0;i<padded.length;i++) padded[i] = next[i];
+    }
+
+    // build terrain triangles from the inner grid (excluding padding)
+    const heights = [];
+    for(let ix = 0; ix < gridSize; ix++){
+      for(let iz = 0; iz < gridSize; iz++){
+        const p = padded[(ix + PAD) * padSize + (iz + PAD)];
+        heights.push({ x: p.x, z: p.z, h: p.h, ix, iz });
+      }
+    }
+
+    // color helper (kept from previous implementation)
+    const colorByBiome = (h, x, z) => {
+      const biome = getBiome(x, z);
+      const atPeak = isAtPeak(x, z);
+      if(biome === 'ocean') return hslToRgb(0.6, 0.9, 0.4);
+      if(biome === 'lake') return hslToRgb(0.58, 0.85, 0.5);
+      if(biome === 'desert') return h < -0.2 ? hslToRgb(0.13, 0.9, 0.55) : hslToRgb(0.12, 0.95, 0.52);
+      if(biome === 'plains') return h < 0.3 ? hslToRgb(0.28, 0.85, 0.48) : hslToRgb(0.25, 0.8, 0.42);
+      if(biome === 'snowy_plains'){
+        if(h < 0.6) return hslToRgb(0.2, 0.7, 0.65);
+        if(h < 1.0) return hslToRgb(0,0,0.85);
+        return hslToRgb(0,0,0.9);
+      }
+      if(biome === 'mountains'){
+        if(atPeak) return hslToRgb(0,0,0.95);
+        if(h > 2.5) return hslToRgb(0,0,0.7);
+        if(h > 2.0) return hslToRgb(0,0,0.65);
+        if(h > 1.5) return hslToRgb(0,0,0.55);
+        return hslToRgb(0.08,0.6,0.5);
+      }
+      return hslToRgb(0,0,0.5);
+    };
+
     for(let ix = 0; ix < CHUNK_SIZE; ix++){
       for(let iz = 0; iz < CHUNK_SIZE; iz++){
-        const idx = ix*(CHUNK_SIZE+1) + iz;
+        const idx = ix * (CHUNK_SIZE + 1) + iz;
         const i1 = idx;
         const i2 = idx + 1;
-        const i3 = idx + (CHUNK_SIZE+1);
-        const i4 = idx + (CHUNK_SIZE+1) + 1;
-        
+        const i3 = idx + (CHUNK_SIZE + 1);
+        const i4 = idx + (CHUNK_SIZE + 1) + 1;
+
         const h00 = heights[i1].h;
         const h10 = heights[i2].h;
         const h01 = heights[i3].h;
         const h11 = heights[i4].h;
-        
+
         const v00 = [heights[i1].x, h00, heights[i1].z];
         const v10 = [heights[i2].x, h10, heights[i2].z];
         const v01 = [heights[i3].x, h01, heights[i3].z];
         const v11 = [heights[i4].x, h11, heights[i4].z];
 
-        // color by biome
-        const colorByBiome = (h, x, z) => {
-          const biome = getBiome(x, z);
-          const atPeak = isAtPeak(x, z);
-          
-          if(biome === 'ocean'){
-            return hslToRgb(0.6, 0.9, 0.4); // Deep ocean blue
-          }
-          else if(biome === 'lake'){
-            return hslToRgb(0.58, 0.85, 0.5); // Lake blue
-          }
-          else if(biome === 'desert'){
-            // Sand dunes with height variation
-            if(h < -0.2) return hslToRgb(0.13, 0.9, 0.55); // Light sand
-            return hslToRgb(0.12, 0.95, 0.52); // Golden sand
-          }
-          else if(biome === 'plains'){
-            // Grassy plains with some variation
-            if(h < 0.3) return hslToRgb(0.28, 0.85, 0.48); // Light grass
-            return hslToRgb(0.25, 0.8, 0.42); // Darker grass
-          }
-          else if(biome === 'snowy_plains'){
-            // Snow-covered plains
-            if(h < 0.6) return hslToRgb(0.2, 0.7, 0.65); // Light snow-covered grass
-            if(h < 1.0) return hslToRgb(0, 0, 0.85); // Snow
-            return hslToRgb(0, 0, 0.9); // Pure snow
-          }
-          else if(biome === 'mountains'){
-            // Mountain rocks and peaks
-            if(atPeak) return hslToRgb(0, 0, 0.95); // Snow peaks
-            if(h > 2.5) return hslToRgb(0, 0, 0.7); // Light grey high altitude
-            if(h > 2.0) return hslToRgb(0, 0, 0.65); // Medium grey
-            if(h > 1.5) return hslToRgb(0, 0, 0.55); // Dark grey slopes
-            return hslToRgb(0.08, 0.6, 0.5); // Brown-grey foothills
-          }
-          
-          return hslToRgb(0, 0, 0.5); // Fallback grey
-        };
-
-        // Calculate average position for coloring
         const avgX = (heights[i1].x + heights[i2].x + heights[i3].x + heights[i4].x) / 4;
         const avgZ = (heights[i1].z + heights[i2].z + heights[i3].z + heights[i4].z) / 4;
         const avgH = (h00 + h10 + h01 + h11) / 4;
         const col = colorByBiome(avgH, avgX, avgZ);
 
-        // Calculate terrain steepness to determine triangle division strategy
         const heightVar = Math.max(
           Math.abs(h00 - h10), Math.abs(h10 - h11),
           Math.abs(h11 - h01), Math.abs(h01 - h00),
           Math.abs(h00 - h11), Math.abs(h10 - h01)
         );
-        
-        // Use diagonal split based on height variation for more natural look
-        const diag1 = Math.abs((h00 + h11) - (h10 + h01)); // diagonal height difference
-        
+
+        const diag1 = Math.abs((h00 + h11) - (h10 + h01));
+
         if(heightVar > 1.5){
-          // Steep terrain: add center point and create 4 smaller triangles
           const cx = (heights[i1].x + heights[i2].x + heights[i3].x + heights[i4].x) / 4;
           const cz = (heights[i1].z + heights[i2].z + heights[i3].z + heights[i4].z) / 4;
           const ch = (h00 + h10 + h01 + h11) / 4;
           const vc = [cx, ch, cz];
-          
           tris.push({ verts: [v00, v10, vc], color: col });
           tris.push({ verts: [v10, v11, vc], color: col });
           tris.push({ verts: [v11, v01, vc], color: col });
           tris.push({ verts: [v01, v00, vc], color: col });
         } else if(diag1 < 0.5){
-          // Flat terrain: use normal split
           tris.push({ verts: [v00, v10, v11], color: col });
           tris.push({ verts: [v00, v11, v01], color: col });
         } else {
-          // Moderate slope: use alternate split
           tris.push({ verts: [v00, v10, v01], color: col });
           tris.push({ verts: [v10, v11, v01], color: col });
         }
@@ -535,19 +590,53 @@
     }
 
     // add procedural trees to chunk
-    const treeCount = Math.floor(3 + rnd()*4); // fewer trees overall
-    for(let t=0; t<treeCount; t++){
-      const tx = offsetX + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.9;
-      const tz = offsetZ + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.9;
+    // Increase tree frequency and vary by biome: deserts get fewer, plains/mountains more
+    let baseTrees = 5 + Math.floor(rnd() * 8);
+    const biomeSampleX = offsetX + CHUNK_SIZE*0.5*spacing;
+    const biomeSampleZ = offsetZ + CHUNK_SIZE*0.5*spacing;
+    const sampleBiome = getBiome(biomeSampleX, biomeSampleZ);
+    if(sampleBiome === 'desert' || sampleBiome === 'lake' || sampleBiome === 'ocean') baseTrees = Math.max(0, Math.floor(baseTrees * 0.35));
+    if(sampleBiome === 'plains' || sampleBiome === 'snowy_plains') baseTrees = Math.max(1, Math.floor(baseTrees * 1.2));
+    if(sampleBiome === 'mountains') baseTrees = Math.max(2, Math.floor(baseTrees * 1.6));
+    const treeCount = baseTrees;
+
+    // Generate clustered tree positions deterministically using rnd
+    const positions = [];
+    const clusters = Math.max(1, Math.floor(treeCount / 3));
+    for(let c=0;c<clusters;c++){
+      const cx = offsetX + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.7;
+      const cz = offsetZ + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.7;
+      const clusterSize = 2 + Math.floor(rnd() * Math.max(2, Math.floor(treeCount/2)));
+      const radius = 1 + rnd() * (CHUNK_SIZE * 0.25);
+      for(let i=0;i<clusterSize;i++){
+        const rx = (rnd() - 0.5) * 2;
+        const rz = (rnd() - 0.5) * 2;
+        const tx = cx + rx * radius;
+        const tz = cz + rz * radius;
+        positions.push({x:tx,z:tz,cluster:true});
+      }
+    }
+    // Add a few outliers spread across the chunk
+    const outliers = Math.max(1, Math.floor(treeCount * 0.3));
+    for(let o=0;o<outliers;o++){
+      const tx = offsetX + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.95;
+      const tz = offsetZ + (rnd()-0.5) * CHUNK_SIZE * spacing * 0.95;
+      positions.push({x:tx,z:tz,cluster:false});
+    }
+
+    // Place vegetation at generated positions
+    for(const ppos of positions){
+      const tx = ppos.x;
+      const tz = ppos.z;
       const th = heightAt(tx, tz);
       const biome = getBiome(tx, tz);
-      
+
       // Only place vegetation in appropriate biomes
       if(biome === 'ocean' || biome === 'lake') continue;
-      
+
       let canPlaceVegetation = false;
       let vegetationType = null;
-      
+
       // Biome-specific height ranges and vegetation types
       if(biome === 'desert'){
         // Desert gets cacti
@@ -559,13 +648,13 @@
         // Plains prefer oaks and shrubs
         if(th > 0.1 && th < 0.5) {
           canPlaceVegetation = true;
-          vegetationType = Math.random() > 0.4 ? 'oak' : 'shrub';
+          vegetationType = rnd() > 0.4 ? 'oak' : 'shrub';
         }
       } else if(biome === 'snowy_plains'){
         // Snowy plains prefer evergreens and shrubs
         if(th > 0.8 && th < 1.5) {
           canPlaceVegetation = true;
-          vegetationType = Math.random() > 0.5 ? 'evergreen' : 'shrub';
+          vegetationType = rnd() > 0.5 ? 'evergreen' : 'shrub';
         }
       } else if(biome === 'mountains'){
         // Mountains prefer tall evergreens
@@ -574,9 +663,9 @@
           vegetationType = 'evergreen';
         }
       }
-      
+
       if(!canPlaceVegetation) continue;
-      
+
       if(vegetationType === 'cactus'){
         // CACTUS: Tall, narrow, segmented, desert green
         const cactusH = 1.2 + rnd()*0.6;
