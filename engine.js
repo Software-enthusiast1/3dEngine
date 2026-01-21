@@ -589,7 +589,7 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
       }
     }
 
-    // add procedural trees to chunk
+    // add procedural trees to chunk (This is a proof of concept and to be used in develpment for procedually generating structures, the tree models are terrible)
     // Increase tree frequency and vary by biome: deserts get fewer, plains/mountains more
     let baseTrees = 5 + Math.floor(rnd() * 8);
     const biomeSampleX = offsetX + CHUNK_SIZE*0.5*spacing;
@@ -922,10 +922,7 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     const dt = Math.min(0.05, (now - last)/1000); last = now;
     updatePlayer(dt);
 
-    // draw blue skybox background
-    ctx.fillStyle = '#87CEEB'; // sky blue
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.rect(0,0,canvas.width,canvas.height);
+    ctx.clearRect(0,0,canvas.width*2,canvas.height*2);
 
     // render procedural scene with render distance
     const tris = [];
