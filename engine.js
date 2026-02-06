@@ -3,15 +3,130 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
 
 (function(){
   const canvas = document.getElementById('screen');
-  const ctx = canvas.getContext('2d');
+  const gl = canvas.getContext('webgl');
+  if (!gl) { alert('WebGL not supported'); return; }
 
   function resize(){
     canvas.width = window.innerWidth * devicePixelRatio;
     canvas.height = window.innerHeight * devicePixelRatio;
     canvas.style.width = window.innerWidth + 'px';
     canvas.style.height = window.innerHeight + 'px';
-    ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+    gl.viewport(0, 0, canvas.width, canvas.height);
   }
+    // WebGL setup: enable depth buffer
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.clearDepth(1.0);
+    // WebGL shader setup
+    const vertexShaderSource = `
+      attribute vec3 aPosition;
+      attribute vec3 aColor;
+      attribute vec3 aNormal;
+      varying vec3 vColor;
+      varying vec3 vNormal;
+      uniform mat4 uProjection;
+      uniform mat4 uView;
+      void main() {
+        gl_Position = uProjection * uView * vec4(aPosition, 1.0);
+        vColor = aColor;
+        vNormal = aNormal;
+      }
+    `;
+    const fragmentShaderSource = `
+      precision mediump float;
+      varying vec3 vColor;
+      varying vec3 vNormal;
+      void main() {
+        vec3 lightDir = normalize(vec3(0.5, 0.8, 0.3));
+        float diff = max(dot(normalize(vNormal), lightDir), 0.2);
+        gl_FragColor = vec4(vColor * diff, 1.0);
+      }
+    `;
+    function createShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(shader));
+      }
+      return shader;
+    }
+    function createProgram(gl, vsSource, fsSource) {
+      const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+      const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program));
+      }
+      return program;
+    }
+    const program = createProgram(gl, vertexShaderSource, fragmentShaderSource);
+    gl.useProgram(program);
+    // WebGL draw triangles
+    function drawTriangles(triangles, projection, view) {
+      const positions = [];
+      const colors = [];
+      const normals = [];
+      for (const tri of triangles) {
+        // Calculate face normal
+        const e1 = [
+          tri.verts[1][0] - tri.verts[0][0],
+          tri.verts[1][1] - tri.verts[0][1],
+          tri.verts[1][2] - tri.verts[0][2]
+        ];
+        const e2 = [
+          tri.verts[2][0] - tri.verts[0][0],
+          tri.verts[2][1] - tri.verts[0][1],
+          tri.verts[2][2] - tri.verts[0][2]
+        ];
+        const n = vec3.norm(vec3.cross(e1, e2));
+        for (let i = 0; i < 3; ++i) {
+          positions.push(...tri.verts[i]);
+          colors.push(...tri.color.map(c => c / 255));
+          normals.push(...n);
+        }
+      }
+      // Create buffers
+      const posBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+      const colBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+      const normBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+      // Set attributes
+      const aPosition = gl.getAttribLocation(program, 'aPosition');
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      gl.enableVertexAttribArray(aPosition);
+      gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+      const aColor = gl.getAttribLocation(program, 'aColor');
+      gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+      gl.enableVertexAttribArray(aColor);
+      gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
+      const aNormal = gl.getAttribLocation(program, 'aNormal');
+      gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+      gl.enableVertexAttribArray(aNormal);
+      gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+      // Set uniforms
+      const uProjection = gl.getUniformLocation(program, 'uProjection');
+      const uView = gl.getUniformLocation(program, 'uView');
+      gl.uniformMatrix4fv(uProjection, false, projection);
+      gl.uniformMatrix4fv(uView, false, view);
+      // Draw
+      gl.drawArrays(gl.TRIANGLES, 0, positions.length / 3);
+      // Cleanup
+      gl.disableVertexAttribArray(aPosition);
+      gl.disableVertexAttribArray(aColor);
+      gl.disableVertexAttribArray(aNormal);
+      gl.deleteBuffer(posBuffer);
+      gl.deleteBuffer(colBuffer);
+      gl.deleteBuffer(normBuffer);
+    }
   window.addEventListener('resize', resize);
   resize();
 
@@ -123,8 +238,8 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     // rotation from arrow keys
     if(keys['arrowleft']) player.yaw -= rotSpeed * dt;
     if(keys['arrowright']) player.yaw += rotSpeed * dt;
-    if(keys['arrowdown']) player.pitch = Math.max(-Math.PI/2+0.01, player.pitch - rotSpeed * dt);
-    if(keys['arrowup']) player.pitch = Math.min(Math.PI/2-0.01, player.pitch + rotSpeed * dt);
+    if(keys['arrowup']) player.pitch = Math.max(-Math.PI/2+0.01, player.pitch - rotSpeed * dt);
+    if(keys['arrowdown']) player.pitch = Math.min(Math.PI/2-0.01, player.pitch + rotSpeed * dt);
     // roll with Q/E
     if(keys['q']) player.roll -= rotSpeed * dt;
     if(keys['e']) player.roll += rotSpeed * dt;
@@ -137,10 +252,10 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     
     let moveDir = [0, 0, 0];
     
-    if(keys['s']) moveDir = vec3.add(moveDir, forward);
-    if(keys['w']) moveDir = vec3.sub(moveDir, forward);
-    if(keys['d']) moveDir = vec3.sub(moveDir, right);
-    if(keys['a']) moveDir = vec3.add(moveDir, right);
+    if(keys['w']) moveDir = vec3.add(moveDir, forward);
+    if(keys['s']) moveDir = vec3.sub(moveDir, forward);
+    if(keys['a']) moveDir = vec3.sub(moveDir, right);
+    if(keys['d']) moveDir = vec3.add(moveDir, right);
 
     // normalize and apply move speed
     if(moveDir[0]||moveDir[1]||moveDir[2]){
@@ -326,11 +441,11 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     // Get discrete biome from continuous biome value
     const getBiome = (x, z) => {
       const biomeVal = getBiomeValue(x, z);
-      if(biomeVal < -0.45) return 'ocean';
-      if(biomeVal < -0.1) return 'lake';
+      if(biomeVal < -0.35) return 'ocean';
+      if(biomeVal < -0.2) return 'lake';
       // Narrow desert band to reduce desert coverage
-      if(biomeVal < 0.12) return 'desert';
-      if(biomeVal < 0.35) return 'plains';
+      if(biomeVal < 0.05) return 'desert';
+      if(biomeVal < 0.45) return 'plains';
       if(biomeVal < 0.6) return 'snowy_plains';
       return 'mountains';
     };
@@ -908,13 +1023,7 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     return [x,y];
   }
 
-  function drawTriangle(p1,p2,p3,color){
-    ctx.beginPath();
-    ctx.moveTo(p1[0],p1[1]); ctx.lineTo(p2[0],p2[1]); ctx.lineTo(p3[0],p3[1]); ctx.closePath();
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth = 0; ctx.stroke();
-  }
+  // ...removed 2D drawTriangle, replaced by WebGL
 
   // render loop
   let last = performance.now();
@@ -922,63 +1031,59 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     const dt = Math.min(0.05, (now - last)/1000); last = now;
     updatePlayer(dt);
 
-    ctx.clearRect(0,0,canvas.width*2,canvas.height*2);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // render procedural scene with render distance
-    const tris = [];
-    const eyePos = getCameraPos();
-    
-    for(const tri of sceneTriangles){
-      // Check render distance - only process if triangle is within render distance
-      const triCenter = [
-        (tri.verts[0][0] + tri.verts[1][0] + tri.verts[2][0]) / 3,
-        (tri.verts[0][1] + tri.verts[1][1] + tri.verts[2][1]) / 3,
-        (tri.verts[0][2] + tri.verts[1][2] + tri.verts[2][2]) / 3
-      ];
-      const distToTri = vec3.len(vec3.sub(triCenter, eyePos));
-      if(distToTri > RENDER_DISTANCE) continue;
-      
-      const camVerts = tri.verts.map(worldToCamera);
-      // cull if any vertex is behind camera (z > -0.15)
-      if(camVerts.some(v=>v[2] > -0.15)) continue;
-      // compute normal in camera space
-      const e1 = vec3.sub(camVerts[1], camVerts[0]);
-      const e2 = vec3.sub(camVerts[2], camVerts[0]);
-      const normal = vec3.cross(e1,e2);
-      // DISABLED: back-face culling - commented out to debug missing triangles
-      // if(normal[2] <= 0) continue;
-
-      // lighting (simple directional)
-      // Light direction in world space pointing from light to surface
-      const lightWorld = vec3.norm([0.5, 0.8, 0.3]);
-      // Transform light to camera space (same rotation as camera)
-      const cy = Math.cos(-player.yaw), sy = Math.sin(-player.yaw);
-      const cx = Math.cos(-player.pitch), sx = Math.sin(-player.pitch);
-      let lx = lightWorld[0]*cy - lightWorld[2]*sy;
-      let lz = lightWorld[0]*sy + lightWorld[2]*cy;
-      let ly = lightWorld[1];
-      let ly2 = ly*cx - lz*sx;
-      let lz2 = ly*sx + lz*cx;
-      const lightCam = vec3.norm([lx, ly2, lz2]);
-      
-      const nrm = vec3.norm(normal);
-      const diff = Math.max(0.2, vec3.dot(nrm, lightCam));
-
-      // project
-      const proj = camVerts.map(project);
-      const screen = proj.map(p=>ndcToScreen(p.ndc));
-      // average depth for painter
-      const avgZ = (proj[0].z + proj[1].z + proj[2].z) / 3;
-
-      // shade color based on lighting
-      const base = tri.color; // [r,g,b]
-      const col = `rgb(${Math.floor(base[0]*diff)},${Math.floor(base[1]*diff)},${Math.floor(base[2]*diff)})`;
-      tris.push({screen, z: avgZ, color: col});
+    // WebGL: build projection and view matrices
+    function perspectiveMatrix(fov, aspect, near, far) {
+      const f = 1.0 / Math.tan(fov / 2);
+      const nf = 1 / (near - far);
+      return new Float32Array([
+        f / aspect, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (far + near) * nf, -1,
+        0, 0, (2 * far * near) * nf, 0
+      ]);
     }
-
-    // painter's algorithm (far -> near)
-    tris.sort((a,b)=>a.z - b.z);
-    for(const t of tris) drawTriangle(t.screen[0], t.screen[1], t.screen[2], t.color);
+    function lookAtMatrix(eye, target, up) {
+      // Build lookAt matrix, then apply roll
+      const z = vec3.norm(vec3.sub(eye, target));
+      const x = vec3.norm(vec3.cross(up, z));
+      const y = vec3.cross(z, x);
+      let m = [
+        x[0], y[0], z[0], 0,
+        x[1], y[1], z[1], 0,
+        x[2], y[2], z[2], 0,
+        -vec3.dot(x, eye), -vec3.dot(y, eye), -vec3.dot(z, eye), 1
+      ];
+      // Apply roll (rotation around Z axis)
+      const cr = Math.cos(-player.roll), sr = Math.sin(-player.roll);
+      // 3x3 rotation for roll
+      const rollMat = [
+        cr, -sr, 0,
+        sr,  cr, 0,
+        0,   0,  1
+      ];
+      // Multiply rollMat * upper 3x3 of m
+      let out = new Float32Array(16);
+      for (let row = 0; row < 3; ++row) {
+        for (let col = 0; col < 3; ++col) {
+          out[col*4+row] = rollMat[row*3+0]*m[col*4+0] + rollMat[row*3+1]*m[col*4+1] + rollMat[row*3+2]*m[col*4+2];
+        }
+      }
+      // Copy translation and bottom row
+      out[12] = m[12];
+      out[13] = m[13];
+      out[14] = m[14];
+      out[15] = m[15];
+      return out;
+    }
+    const aspect = canvas.width / canvas.height;
+    const projection = perspectiveMatrix(player.fov, aspect, 0.1, 1000);
+    const eye = getCameraPos();
+    const target = vec3.add(eye, [Math.sin(-player.yaw), Math.sin(-player.pitch), Math.cos(-player.yaw)]);
+    const up = [0, 1, 0];
+    const view = lookAtMatrix(eye, target, up);
+    drawTriangles(sceneTriangles, projection, view);
 
     requestAnimationFrame(frame);
   }
