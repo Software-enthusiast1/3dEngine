@@ -130,6 +130,8 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
   window.addEventListener('resize', resize);
   resize();
 
+  
+
   // Simple vector/matrix helpers
   const vec3 = {
     add: (a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
@@ -441,11 +443,11 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
     // Get discrete biome from continuous biome value
     const getBiome = (x, z) => {
       const biomeVal = getBiomeValue(x, z);
-      if(biomeVal < -0.35) return 'ocean';
-      if(biomeVal < -0.2) return 'lake';
+      if(biomeVal < -0.45) return 'ocean';
+      if(biomeVal < -0.3) return 'lake';
       // Narrow desert band to reduce desert coverage
-      if(biomeVal < 0.05) return 'desert';
-      if(biomeVal < 0.45) return 'plains';
+      if(biomeVal < -0.1) return 'desert';
+      if(biomeVal < 0.50) return 'plains';
       if(biomeVal < 0.6) return 'snowy_plains';
       return 'mountains';
     };
@@ -466,13 +468,20 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
       const smoothT = Math.max(0, Math.min(1, t)); // Clamp to 0-1
       
       // Blend heights based on smooth biome transition
-      if(biomeVal < -0.15){
-        // Ocean/Lake transition
-        const blend = (biomeVal + 0.4) / 0.25;
-        if(blend < 0) h = h * 0.3 - 2.0; // Ocean
-        else if(blend > 1) h = h * 0.2 - 0.5; // Lake
-        else h = h * (0.3 - 0.1*blend) - (2.0 - 1.5*blend); // Smooth blend
-      } else if(biomeVal < 0.05){
+        // helper smoothstep and mix to reduce abrupt jumps at biome boundaries
+        const smoothstep = (a, b, t) => {
+          const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+          return x * x * (3 - 2 * x);
+        };
+        const mix = (a, b, t) => a * (1 - t) + b * t;
+
+        if(biomeVal < -0.15){
+          // Ocean <-> Lake transition: use smooth interpolation instead of piecewise branches
+          const t = smoothstep(-0.6, -0.2, biomeVal);
+          const oceanH = h * 0.3 - 2.0;
+          const lakeH = h * 0.2 - 0.5;
+          h = mix(oceanH, lakeH, t);
+        } else if(biomeVal < 0.05){
         // Lake/Desert transition
         const blend = (biomeVal + 0.15) / 0.2;
         if(blend < 0) h = h * 0.2 - 0.5;
@@ -539,12 +548,12 @@ import SimplexNoise from 'https://cdn.jsdelivr.net/npm/simplex-noise@3.0.0/+esm'
       }
 
       // Reduce water amplitude for oceans/lakes so they are flatter but still gentle hills
-      // Scale depends on biome to keep mountains high while flattening sea/lake regions
-      const biomeValForReturn = getBiome(x, z);
-      if(biomeValForReturn === 'ocean'){
-        return h * 1.0 - 2.2; // lower sea level and reduced amplitude
-      } else if(biomeValForReturn === 'lake'){
-        return h * 1.6 - 0.6; // shallower lakes
+      // Use continuous biomeVal blending instead of discrete biome classification
+      const waterT = smoothstep(-0.6, -0.2, biomeVal);
+      if(biomeVal < -0.25){
+        const oceanH = h * 1.0 - 2.2; // lower sea level and reduced amplitude
+        const lakeH = h * 1.6 - 0.6;  // shallower lakes
+        return mix(oceanH, lakeH, waterT);
       }
 
       return h * 3.5;
